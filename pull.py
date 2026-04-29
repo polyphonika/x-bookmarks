@@ -1,6 +1,9 @@
 """Fetch X bookmarks via OAuth 2.0 PKCE and cache to SQLite.
 
-Usage: python pull.py
+Usage:
+  python pull.py          # incremental: stop after N consecutive seen IDs
+  python pull.py --full   # re-fetch every bookmark (refreshes media etc.)
+
 First run prints an authorization URL — open it in your browser, click
 Authorize, and the local server captures the callback. Tokens are
 persisted to tokens.json. Subsequent runs reuse / refresh the token.
@@ -8,6 +11,7 @@ persisted to tokens.json. Subsequent runs reuse / refresh the token.
 All bookmarks are stored regardless of date; push.py decides which
 worksheet they land in.
 """
+import argparse
 import base64
 import hashlib
 import json
@@ -32,6 +36,14 @@ SCOPES = "tweet.read users.read bookmark.read offline.access"
 
 DB_PATH = Path("bookmarks.db")
 TOKEN_PATH = Path("tokens.json")
+
+# Bookmarks come back in reverse-chronological order of bookmark date,
+# so once we've seen N consecutive IDs that are already in the DB we
+# can safely stop — any further results are guaranteed to be older
+# bookmarks we've already cached. New bookmarks always float to the
+# top, so this never misses recent activity. Re-bookmarking an old
+# tweet also moves it to the top, where we'd see it.
+STOP_THRESHOLD = 10
 
 
 def _pkce_pair() -> tuple[str, str]:
@@ -219,6 +231,14 @@ def _get(url: str, tok: dict, params: dict | None = None) -> dict:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Disable short-circuit; re-fetch every bookmark.",
+    )
+    args = parser.parse_args()
+
     tok = _token()
     me = _get("https://api.x.com/2/users/me", tok)
     user_id = me["data"]["id"]
@@ -226,9 +246,16 @@ def main() -> None:
 
     db = _db()
     cur = db.cursor()
+    existing_ids: set[str] = (
+        set()
+        if args.full
+        else {row[0] for row in db.execute("SELECT id FROM bookmarks")}
+    )
     inserted = 0
     updated = 0
     pages = 0
+    consecutive_seen = 0
+    short_circuited = False
     pagination_token: str | None = None
 
     while True:
@@ -266,6 +293,7 @@ def main() -> None:
             url = f"https://x.com/{handle}/status/{tw['id']}" if handle else ""
             media_url, media_type = _pick_media(tw, media)
             now = datetime.now(timezone.utc).isoformat()
+            already_seen = tw["id"] in existing_ids
             cur.execute(
                 """
                 INSERT OR IGNORE INTO bookmarks
@@ -297,7 +325,17 @@ def main() -> None:
                 if cur.rowcount:
                     updated += 1
 
+            if already_seen:
+                consecutive_seen += 1
+            else:
+                consecutive_seen = 0
+            if not args.full and consecutive_seen >= STOP_THRESHOLD:
+                short_circuited = True
+                break
+
         db.commit()
+        if short_circuited:
+            break
         pagination_token = page.get("meta", {}).get("next_token")
         if not pagination_token:
             break
@@ -310,6 +348,11 @@ def main() -> None:
         f"Pages: {pages}  inserted: {inserted}  updated: {updated}  "
         f"total in DB: {total}  with media: {with_media}"
     )
+    if short_circuited:
+        print(
+            f"(short-circuited after {STOP_THRESHOLD} consecutive seen IDs — "
+            f"use --full to re-fetch everything)"
+        )
 
 
 if __name__ == "__main__":

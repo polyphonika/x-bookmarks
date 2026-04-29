@@ -36,6 +36,13 @@ script is safe.
   insert-then-update: existing rows get text/raw_json/media refreshed,
   but `topic` and `summary` are preserved. `classify.py run` only touches
   rows where `topic IS NULL`.
+- **Pull short-circuit.** Bookmarks come back newest-first by bookmark
+  date, so once `pull.py` sees 10 consecutive IDs it already has, it
+  stops paginating. Routine refresh costs pennies (~1 page of 25 calls)
+  instead of dollars (~38 pages × 25). New bookmarks always float to the
+  top, so this never misses recent activity. Use `python pull.py --full`
+  to disable the short-circuit and re-fetch everything (e.g. to refresh
+  media URLs that may have rotated).
 - **Images via `=IMAGE()`.** For tweets with photos we store the media
   URL; for videos and animated GIFs we store the still-frame
   `preview_image_url`. `push.py` writes `=IMAGE("url")` formulas so
@@ -128,7 +135,8 @@ ID | Date | Author | Topic | Image | Summary | Text | URL | Done | Notes
 - **Topic drift on re-runs.** If you re-bookmark heavily in a new domain,
   `topics.json` may not cover it. Re-run `discover` periodically and merge
   by hand.
-- **Re-pulling re-bills.** Each `pull.py` re-fetches everything (bookmarks
-  endpoint has no `since_id`), so each run costs ~$1 (or up to $5 at the
-  buggy 5× rate) for a ~1000-bookmark library. Consider caching aggressively
-  if running on a cron.
+- **Re-pull cost on first / `--full` runs.** The bookmarks endpoint has
+  no `since_id`, so the only way to refresh deep history is to paginate
+  from the top. A full pull of ~1000 bookmarks costs ~$1 (or up to $5
+  at the buggy 5× rate). Routine incremental runs cost cents thanks to
+  the short-circuit.
