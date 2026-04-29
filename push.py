@@ -29,6 +29,7 @@ HEADER = [
     "Date",
     "Author",
     "Topic",
+    "Image",
     "Summary",
     "Text",
     "URL",
@@ -47,12 +48,14 @@ def _sheet_id(value: str) -> str:
 
 
 def _row(b: tuple) -> list:
-    bid, created_at, author, topic, summary, text, url = b
+    bid, created_at, author, topic, summary, text, url, media_url = b
+    image_cell = f'=IMAGE("{media_url}")' if media_url else ""
     return [
         bid,
         (created_at or "")[:10],
         f"@{author}" if author else "",
         topic or "",
+        image_cell,
         summary or "",
         text or "",
         url or "",
@@ -145,7 +148,8 @@ def main() -> None:
     db = sqlite3.connect(DB_PATH)
     db_rows = db.execute(
         """
-        SELECT id, created_at, author_username, topic, summary, text, url
+        SELECT id, created_at, author_username, topic, summary, text, url,
+               media_url
         FROM bookmarks
         ORDER BY topic IS NULL, topic, created_at DESC
         """

@@ -152,6 +152,27 @@ def _token() -> dict:
     return tok
 
 
+def _pick_media(tw: dict, media_lookup: dict) -> tuple[str | None, str | None]:
+    """Return (image_url, media_type) for the first media item, if any.
+
+    For photos we use `url`. For videos and animated GIFs there's no
+    direct image, so we use `preview_image_url` (the still frame) — that
+    way Sheets =IMAGE() can render a thumbnail.
+    """
+    keys = tw.get("attachments", {}).get("media_keys", [])
+    if not keys:
+        return None, None
+    m = media_lookup.get(keys[0])
+    if not m:
+        return None, None
+    mtype = m.get("type")
+    if mtype == "photo":
+        return m.get("url"), mtype
+    if mtype in ("video", "animated_gif"):
+        return m.get("preview_image_url"), mtype
+    return None, mtype
+
+
 def _db() -> sqlite3.Connection:
     db = sqlite3.connect(DB_PATH)
     db.execute(
@@ -166,10 +187,16 @@ def _db() -> sqlite3.Connection:
           raw_json TEXT,
           fetched_at TEXT,
           topic TEXT,
-          summary TEXT
+          summary TEXT,
+          media_url TEXT,
+          media_type TEXT
         )
         """
     )
+    cols = {row[1] for row in db.execute("PRAGMA table_info(bookmarks)")}
+    for col in ("media_url", "media_type"):
+        if col not in cols:
+            db.execute(f"ALTER TABLE bookmarks ADD COLUMN {col} TEXT")
     db.commit()
     return db
 
@@ -200,6 +227,7 @@ def main() -> None:
     db = _db()
     cur = db.cursor()
     inserted = 0
+    updated = 0
     pages = 0
     pagination_token: str | None = None
 
@@ -209,9 +237,12 @@ def main() -> None:
         # See: https://devcommunity.x.com/t/bookmarks-api-v2-stops-paginating-after-3-pages-no-next-token-returned/257339
         params: dict = {
             "max_results": 25,
-            "tweet.fields": "created_at,author_id,public_metrics,entities",
-            "expansions": "author_id",
+            "tweet.fields": (
+                "created_at,author_id,public_metrics,entities,attachments"
+            ),
+            "expansions": "author_id,attachments.media_keys",
             "user.fields": "username,name",
+            "media.fields": "url,preview_image_url,type",
         }
         if pagination_token:
             params["pagination_token"] = pagination_token
@@ -223,7 +254,9 @@ def main() -> None:
         if pagination_token:
             time.sleep(1)  # gentler on the pagination bug
 
-        users = {u["id"]: u for u in page.get("includes", {}).get("users", [])}
+        includes = page.get("includes", {})
+        users = {u["id"]: u for u in includes.get("users", [])}
+        media = {m["media_key"]: m for m in includes.get("media", [])}
         data = page.get("data", [])
         if not data:
             break
@@ -231,26 +264,38 @@ def main() -> None:
         for tw in data:
             handle = users.get(tw["author_id"], {}).get("username", "")
             url = f"https://x.com/{handle}/status/{tw['id']}" if handle else ""
+            media_url, media_type = _pick_media(tw, media)
+            now = datetime.now(timezone.utc).isoformat()
             cur.execute(
                 """
                 INSERT OR IGNORE INTO bookmarks
                   (id, text, author_id, author_username, created_at, url,
-                   raw_json, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   raw_json, fetched_at, media_url, media_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    tw["id"],
-                    tw["text"],
-                    tw["author_id"],
-                    handle,
-                    tw["created_at"],
-                    url,
-                    json.dumps(tw),
-                    datetime.now(timezone.utc).isoformat(),
+                    tw["id"], tw["text"], tw["author_id"], handle,
+                    tw["created_at"], url, json.dumps(tw), now,
+                    media_url, media_type,
                 ),
             )
             if cur.rowcount:
                 inserted += 1
+            else:
+                cur.execute(
+                    """
+                    UPDATE bookmarks
+                       SET text = ?, raw_json = ?, fetched_at = ?,
+                           media_url = ?, media_type = ?
+                     WHERE id = ?
+                    """,
+                    (
+                        tw["text"], json.dumps(tw), now,
+                        media_url, media_type, tw["id"],
+                    ),
+                )
+                if cur.rowcount:
+                    updated += 1
 
         db.commit()
         pagination_token = page.get("meta", {}).get("next_token")
@@ -258,7 +303,13 @@ def main() -> None:
             break
 
     total = db.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0]
-    print(f"Pages: {pages}  inserted: {inserted}  total in DB: {total}")
+    with_media = db.execute(
+        "SELECT COUNT(*) FROM bookmarks WHERE media_url IS NOT NULL"
+    ).fetchone()[0]
+    print(
+        f"Pages: {pages}  inserted: {inserted}  updated: {updated}  "
+        f"total in DB: {total}  with media: {with_media}"
+    )
 
 
 if __name__ == "__main__":
