@@ -1,11 +1,12 @@
-"""Push classified bookmarks to a Google Sheet (upsert by tweet ID).
+"""Push classified bookmarks to Google Sheets — Recent + Older tabs.
 
-Existing rows in the sheet are NEVER overwritten — your Done checkboxes,
-Notes, and any other columns you add survive every re-run. Only NEW
-bookmarks (rows whose tweet ID isn't already in the sheet) are appended.
+Two worksheets: "Recent" for tweets posted on/after CUTOFF_ISO, "Older"
+for everything before. Upsert-by-tweet-ID per worksheet keeps your hand-
+edits intact: existing rows are NEVER overwritten — only new tweet IDs
+are appended.
 
-Schema in column order: ID | Date | Author | Topic | Summary | Text | URL |
-Done (checkbox) | Notes.
+Schema in column order: ID | Date | Author | Topic | Summary | Text |
+URL | Done (checkbox) | Notes.
 """
 import os
 import re
@@ -20,6 +21,8 @@ load_dotenv()
 
 DB_PATH = Path("bookmarks.db")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+CUTOFF_ISO = "2025-09-01T00:00:00.000Z"
 
 HEADER = [
     "ID",
@@ -58,6 +61,10 @@ def _row(b: tuple) -> list:
     ]
 
 
+def _last_col_letter(n: int) -> str:
+    return chr(ord("A") + n - 1)
+
+
 def _set_done_checkboxes(ss, ws, num_rows: int) -> None:
     """Apply BOOLEAN data validation (checkboxes) to the Done column."""
     if num_rows <= 0:
@@ -85,13 +92,55 @@ def _set_done_checkboxes(ss, ws, num_rows: int) -> None:
     )
 
 
+def _get_or_create_ws(ss, title: str):
+    """Return the worksheet by title, migrating Sheet1 → Recent if needed."""
+    existing = {w.title: w for w in ss.worksheets()}
+    if title in existing:
+        return existing[title]
+    if title == "Recent" and "Sheet1" in existing:
+        sheet1 = existing["Sheet1"]
+        sheet1.update_title("Recent")
+        return sheet1
+    return ss.add_worksheet(title=title, rows=1000, cols=len(HEADER) + 1)
+
+
+def _upsert(ss, ws, db_rows: list, label: str) -> None:
+    values = ws.get_all_values()
+    has_header = bool(values) and values[0] == HEADER
+
+    if not has_header:
+        ws.clear()
+        rows = [HEADER] + [_row(b) for b in db_rows]
+        ws.update(
+            values=rows, range_name="A1", value_input_option="USER_ENTERED"
+        )
+        ws.freeze(rows=1)
+        ws.format(
+            f"A1:{_last_col_letter(len(HEADER))}1",
+            {"textFormat": {"bold": True}},
+        )
+        _set_done_checkboxes(ss, ws, len(db_rows))
+        print(f"  [{label}] initial write: {len(db_rows)} rows")
+        return
+
+    existing_ids = {row[0] for row in values[1:] if row and row[0]}
+    to_append = [_row(b) for b in db_rows if b[0] not in existing_ids]
+    if not to_append:
+        print(f"  [{label}] no new ({len(values) - 1} rows)")
+        return
+
+    ws.append_rows(to_append, value_input_option="USER_ENTERED")
+    new_total = len(values) - 1 + len(to_append)
+    _set_done_checkboxes(ss, ws, new_total)
+    print(f"  [{label}] appended {len(to_append)} (now {new_total})")
+
+
 def main() -> None:
     sa_file = os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"]
     sheet_id = _sheet_id(os.environ["GOOGLE_SHEET_ID"])
     creds = Credentials.from_service_account_file(sa_file, scopes=SCOPES)
     gc = gspread.authorize(creds)
     ss = gc.open_by_key(sheet_id)
-    ws = ss.sheet1
 
     db = sqlite3.connect(DB_PATH)
     db_rows = db.execute(
@@ -102,33 +151,15 @@ def main() -> None:
         """
     ).fetchall()
 
-    values = ws.get_all_values()
-    has_correct_header = bool(values) and values[0] == HEADER
-
-    if not has_correct_header:
-        ws.clear()
-        rows = [HEADER] + [_row(b) for b in db_rows]
-        ws.update(
-            values=rows, range_name="A1", value_input_option="USER_ENTERED"
-        )
-        ws.freeze(rows=1)
-        ws.format(f"A1:{chr(ord('A') + len(HEADER) - 1)}1", {"textFormat": {"bold": True}})
-        _set_done_checkboxes(ss, ws, len(db_rows))
-        print(f"Initial write: {len(db_rows)} bookmarks")
-        return
-
-    existing_ids = {row[0] for row in values[1:] if row and row[0]}
-    to_append = [_row(b) for b in db_rows if b[0] not in existing_ids]
-    if not to_append:
-        print(f"No new bookmarks. Sheet has {len(values) - 1} rows.")
-        return
-
-    ws.append_rows(to_append, value_input_option="USER_ENTERED")
-    new_total = len(values) - 1 + len(to_append)
-    _set_done_checkboxes(ss, ws, new_total)
+    recent = [r for r in db_rows if (r[1] or "") >= CUTOFF_ISO]
+    older = [r for r in db_rows if (r[1] or "") < CUTOFF_ISO]
     print(
-        f"Appended {len(to_append)} new bookmarks. Sheet now has {new_total} rows."
+        f"DB: {len(db_rows)} total "
+        f"({len(recent)} recent, {len(older)} older)"
     )
+
+    _upsert(ss, _get_or_create_ws(ss, "Recent"), recent, "Recent")
+    _upsert(ss, _get_or_create_ws(ss, "Older"), older, "Older")
 
 
 if __name__ == "__main__":
