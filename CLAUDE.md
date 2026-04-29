@@ -20,23 +20,31 @@ script is safe.
 - **Output surface: Google Sheet.** Cross-device, private, filterable. Other
   options (Notion, Airtable, local SQLite + UI) all add work without giving
   more than the sheet does.
+- **Two worksheets: `Recent` + `Older`.** Tweets posted on or after
+  `CUTOFF_ISO` (2025-09-01) go to Recent — that's the priority list. Older
+  tweets land in Older as a "not a priority but kept" backlog. Cutoff is a
+  presentation concern only: pull stores everything; push splits by date.
+- **Upsert by tweet ID, never overwrite.** `push.py` matches by ID column
+  and only appends rows whose ID isn't already in the sheet. Hand-edited
+  Done checkboxes and Notes survive every re-run. The price: a one-time
+  clear-and-rewrite when the schema changes (header mismatch detected).
 - **Topic discovery is two-phase.** `classify.py discover` proposes 6–10
   buckets from a 50-bookmark sample. The user edits `topics.json` by hand,
   then `classify.py run` classifies every bookmark into that fixed list.
-  This keeps the taxonomy human-controlled and prevents long-tail drift.
-- **Date cutoff: tweets created on or after 2025-09-01.** Older tweets are
-  skipped at pull time. Driven by user intent ("last six months"). Note: this
-  filters by *tweet* `created_at`, not bookmark date — the bookmarks endpoint
-  doesn't expose bookmark timestamp. So an old tweet bookmarked recently is
-  still excluded.
-- **Idempotent storage.** `bookmarks.db` is a SQLite file; `INSERT OR IGNORE`
-  on tweet ID. Re-running `pull.py` only pulls new bookmarks. `classify.py
-  run` only touches rows where `topic IS NULL`.
-- **Models: split by phase.** `discover` (one-shot, taxonomy quality matters)
-  uses `claude-opus-4-7`. `run` (per-bookmark classification, hundreds of
-  calls) uses `claude-haiku-4-5` — short input, structured output is exactly
-  what Haiku is for, and the cost difference is ~10× on the volume step.
-  Both via `messages.parse()` with Pydantic schemas.
+  Keeps the taxonomy human-controlled and prevents long-tail drift.
+- **Idempotent storage.** SQLite is the source of truth. `pull.py`
+  insert-then-update: existing rows get text/raw_json/media refreshed,
+  but `topic` and `summary` are preserved. `classify.py run` only touches
+  rows where `topic IS NULL`.
+- **Images via `=IMAGE()`.** For tweets with photos we store the media
+  URL; for videos and animated GIFs we store the still-frame
+  `preview_image_url`. `push.py` writes `=IMAGE("url")` formulas so
+  Sheets renders inline thumbnails on every device.
+- **Models: split by phase.** `discover` (one-shot, taxonomy quality
+  matters) uses `claude-opus-4-7`. `run` (per-bookmark classification,
+  hundreds of calls) uses `claude-haiku-4-5` — short input, structured
+  output is exactly what Haiku is for, and the cost difference is ~10× on
+  the volume step. Both via `messages.parse()` with Pydantic schemas.
 
 ## Cost (X API)
 
@@ -72,15 +80,23 @@ the rate as 1–5× advertised until X confirms.
 
 ## Run
 
+First-time setup (the manual step is `discover` — review topics by hand):
+
 ```
 uv run python pull.py                 # OAuth (first run) + fetch → bookmarks.db
 uv run python classify.py discover    # propose topics → topics.json (review by hand!)
 uv run python classify.py run         # tag every bookmark with topic + summary
-uv run python push.py                 # write to Google Sheet
+uv run python push.py                 # write Recent + Older worksheets
 ```
 
-Re-run `pull.py` whenever you want to pick up new bookmarks; then
-`classify.py run` to tag the new ones; then `push.py` to refresh the sheet.
+Routine refresh (every step idempotent):
+
+```
+uv run python all.py                  # = pull + classify run + push
+```
+
+`all.py` skips `classify discover` because that's a one-time setup. If you
+later want to re-derive topics, run `discover` by hand.
 
 ## Files (all gitignored)
 
@@ -90,16 +106,29 @@ Re-run `pull.py` whenever you want to pick up new bookmarks; then
 - `topics.json` — the topic taxonomy (edit by hand between discover and run)
 - `.env` — secrets
 
+## Sheet schema
+
+Each worksheet has the same columns:
+
+```
+ID | Date | Author | Topic | Image | Summary | Text | URL | Done | Notes
+```
+
+- `ID`: anchors the upsert. Hide column A in the sheet UI for cleaner reading.
+- `Image`: `=IMAGE("url")` formula. Empty for text-only tweets.
+- `Done`: native Sheets checkbox (programmatically set as BOOLEAN data
+  validation). Tick when you've processed a bookmark.
+- `Notes`: yours. Anything you type here survives every re-run.
+
 ## Open questions / things to revisit
 
-- **Bookmark-date filtering.** If we want "bookmarked since X" rather than
-  "tweet posted since X", we'd need to track which tweet IDs we've seen
-  before and stop paginating when we hit one already in the DB. Not worth
-  doing unless old-tweet-recently-bookmarked turns out to matter.
-- **Pagination cost optimization.** Today we paginate through all bookmarks
-  even ones older than the cutoff. Fine at a few hundred bookmarks; if this
-  ever covers years of history, short-circuit when an entire page is below
-  the cutoff.
+- **Pagination bug workaround.** `pull.py` uses `max_results=25` (not 100)
+  to dodge a documented X API bug where `next_token` is silently dropped at
+  larger page sizes. There's also a soft ~800-bookmark cap on this endpoint.
 - **Topic drift on re-runs.** If you re-bookmark heavily in a new domain,
   `topics.json` may not cover it. Re-run `discover` periodically and merge
   by hand.
+- **Re-pulling re-bills.** Each `pull.py` re-fetches everything (bookmarks
+  endpoint has no `since_id`), so each run costs ~$1 (or up to $5 at the
+  buggy 5× rate) for a ~1000-bookmark library. Consider caching aggressively
+  if running on a cron.
