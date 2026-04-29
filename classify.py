@@ -20,7 +20,8 @@ load_dotenv()
 
 DB_PATH = Path("bookmarks.db")
 TOPICS_PATH = Path("topics.json")
-MODEL = "claude-opus-4-7"
+DISCOVER_MODEL = "claude-opus-4-7"
+CLASSIFY_MODEL = "claude-haiku-4-5"
 SAMPLE_SIZE = 50
 
 client = anthropic.Anthropic()
@@ -53,7 +54,7 @@ def discover() -> None:
 
     sample = "\n\n---\n\n".join(f"@{u}: {t}" for t, u in rows)
     msg = client.messages.parse(
-        model=MODEL,
+        model=DISCOVER_MODEL,
         max_tokens=2048,
         output_format=TopicProposal,
         messages=[
@@ -111,7 +112,7 @@ def run() -> None:
     for i, (bid, text, handle) in enumerate(rows, 1):
         try:
             msg = client.messages.parse(
-                model=MODEL,
+                model=CLASSIFY_MODEL,
                 max_tokens=400,
                 system=system,
                 output_format=Classification,

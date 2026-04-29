@@ -32,8 +32,11 @@ script is safe.
 - **Idempotent storage.** `bookmarks.db` is a SQLite file; `INSERT OR IGNORE`
   on tweet ID. Re-running `pull.py` only pulls new bookmarks. `classify.py
   run` only touches rows where `topic IS NULL`.
-- **Model: `claude-opus-4-7`** with structured outputs via `messages.parse()`.
-  Adaptive thinking off (it's a simple classification task).
+- **Models: split by phase.** `discover` (one-shot, taxonomy quality matters)
+  uses `claude-opus-4-7`. `run` (per-bookmark classification, hundreds of
+  calls) uses `claude-haiku-4-5` — short input, structured output is exactly
+  what Haiku is for, and the cost difference is ~10× on the volume step.
+  Both via `messages.parse()` with Pydantic schemas.
 
 ## Cost (X API)
 
@@ -44,12 +47,13 @@ the rate as 1–5× advertised until X confirms.
 
 ## Setup (one-time)
 
-1. **Python env**
+1. **Python env** (managed by [uv](https://docs.astral.sh/uv/))
    ```
-   python -m venv .venv && source .venv/bin/activate
-   pip install -r requirements.txt
+   uv sync           # creates .venv and installs from uv.lock
    cp .env.example .env
    ```
+   Run scripts with `uv run python pull.py` (or activate `.venv` once and
+   use `python pull.py` directly).
 
 2. **X developer app** at https://developer.x.com:
    - Set redirect URI to `http://localhost:8765/callback`
@@ -69,10 +73,10 @@ the rate as 1–5× advertised until X confirms.
 ## Run
 
 ```
-python pull.py                 # OAuth (first run) + fetch bookmarks → bookmarks.db
-python classify.py discover    # propose topics → topics.json (review by hand!)
-python classify.py run         # tag every bookmark with topic + summary
-python push.py                 # write to Google Sheet
+uv run python pull.py                 # OAuth (first run) + fetch → bookmarks.db
+uv run python classify.py discover    # propose topics → topics.json (review by hand!)
+uv run python classify.py run         # tag every bookmark with topic + summary
+uv run python push.py                 # write to Google Sheet
 ```
 
 Re-run `pull.py` whenever you want to pick up new bookmarks; then

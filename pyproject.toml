@@ -1,0 +1,13 @@
+[project]
+name = "bookmarks"
+version = "0.1.0"
+description = "X bookmarks → Claude → Google Sheets pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40",
+    "google-auth>=2.30",
+    "gspread>=6.0",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+]
